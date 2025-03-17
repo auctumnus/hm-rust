@@ -97,17 +97,14 @@ impl Monotype {
     }
 
     fn apply_substitution(&self, substitution: &Substitution) -> Monotype {
-        println!("{self}, {substitution:?}");
-        let out = match self {
+        match self {
             Monotype::Var(v) => {
                 substitution.get(*v).cloned().unwrap_or(Monotype::Var(*v))
             }
             Monotype::Arrow(m_1, m_2) =>
                 Monotype::Arrow(Box::new(m_1.apply_substitution(substitution)), Box::new(m_2.apply_substitution(substitution))),
             m => m.clone()
-        };
-        println!("{out}");
-        return out;
+        }
     }
 }
 
@@ -368,14 +365,9 @@ fn infer(env: &Environment, expr: &Expr) -> (Monotype, Vec<Constraint>) {
             let value_type = value_type.apply_substitution(&substitution);
             let cs_ftv = ftv_constraints(&cs);
 
-            println!("cs_ftv: {:?}", cs_ftv);
-
             let skolems: Vec<(TypeVar, Skolem)> = value_type.ftv().union(&cs_ftv).copied().map(|t| (t, Skolem::new())).collect();
 
             let skolemizer = Substitution(skolems.iter().copied().map(|(t, s)| (t, Monotype::Skolem(s))).collect());
-
-            println!("skolemizer: {:?}", skolemizer);
-            println!("you have {} class constraints", cs.len());
 
             let value_type = value_type.apply_substitution(&skolemizer);
 
@@ -391,8 +383,6 @@ fn infer(env: &Environment, expr: &Expr) -> (Monotype, Vec<Constraint>) {
             let mut env = env.clone();
             
             env.insert(var.to_string(), var_type);
-
-            println!("{:?}", env);
             
             infer(&env, body)
         }
