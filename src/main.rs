@@ -244,6 +244,9 @@ impl Substitution {
     }
 
     fn insert(&mut self, k: TypeVar, v: Monotype) {
+        if v.ftv().contains(&k) {
+            panic!("occur check failed")
+        }
         self.0.insert(k, v);
     }
 
@@ -269,6 +272,7 @@ fn solve(mut constraints: Vec<Constraint>) -> (Vec<Constraint>, Substitution) {
                     if let Some(ty) = substitution.get(v) {
                         constraints.push(Constraint::eq(m, ty.clone()))
                     } else {
+                        let m = m.apply_substitution(&substitution);
                         substitution.insert(v, m);
                     }
                 },
@@ -459,5 +463,25 @@ fn main() {
 
     println!("Type: {}", ty);
     println!("Constraints: {}", stringify_constraints(constraints));
-    println!("Substitution: {:?}", substitution);
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    #[should_panic]
+    fn weird_solve() {
+        let _0 = TypeVar::new();
+        let _1 = TypeVar::new();
+
+        // '1 = ('0 → '0)
+        // '0 = ('1 → '1)
+
+        let constraints = vec![
+            Constraint::eq(Monotype::Var(_0), Monotype::Arrow(Box::new(Monotype::Var(_1)), Box::new(Monotype::Var(_1)))),
+            Constraint::eq(Monotype::Var(_1), Monotype::Arrow(Box::new(Monotype::Var(_0)), Box::new(Monotype::Var(_0)))),
+        ];
+
+        solve(constraints);
+}
 }
