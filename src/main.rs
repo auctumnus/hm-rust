@@ -204,6 +204,10 @@ impl Environment {
     fn lookup(&self, name: &str) -> &Polytype {
         self.0.get(name).expect(&format!("Unbound variable {}", name))
     }
+
+    fn ftv(&self) -> HashSet<TypeVar> {
+        self.0.values().flat_map(|p| p.ty.ftv()).collect()
+    }
 }
 
 enum Expr {
@@ -364,8 +368,9 @@ fn infer(env: &Environment, expr: &Expr) -> (Monotype, Vec<Constraint>) {
             let (cs, substitution) = solve(value_cs);
             let value_type = value_type.apply_substitution(&substitution);
             let cs_ftv = ftv_constraints(&cs);
+            let env_ftv = env.ftv();
 
-            let skolems: Vec<(TypeVar, Skolem)> = value_type.ftv().union(&cs_ftv).copied().map(|t| (t, Skolem::new())).collect();
+            let skolems: Vec<(TypeVar, Skolem)> = value_type.ftv().union(&cs_ftv).filter(|t| !env_ftv.contains(t)).copied().map(|t| (t, Skolem::new())).collect();
 
             let skolemizer = Substitution(skolems.iter().copied().map(|(t, s)| (t, Monotype::Skolem(s))).collect());
 
