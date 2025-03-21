@@ -1,7 +1,9 @@
-use std::{collections::{HashMap, HashSet}, fmt::{self, Display}, sync::atomic::AtomicUsize};
+use std::{collections::{HashMap, HashSet}, env, fmt::{self, Display}, sync::atomic::AtomicUsize};
 
 /// A type variable for inference; can also end up appearing in the final
 /// signature in polymorphic functions.
+/// 
+/// In general, we write type variables as '0, or ?0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeVar(usize);
 
@@ -19,13 +21,17 @@ impl Display for TypeVar {
     }
 }
 
-/// A type variable for inference; can also end up appearing in the final
-/// signature in polymorphic functions.
+/// A skolem variable. These are used to represent type variables that should
+/// not be solved for - they are part of some "higher-up" polymorphic type.
+/// 
+/// Here, we write skolems as greek letters; this is ~somewhat confusing with
+/// our other uses of greek characters, but they don't need to show up that
+/// much.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Skolem(usize);
 
 impl Skolem {
-    /// Construct a new type variable.
+    /// Construct a new skolem variable.
     pub fn new() -> Skolem {
         static VAR_COUNTER: AtomicUsize = AtomicUsize::new(0);
         Skolem(VAR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
@@ -39,7 +45,7 @@ static GREEK_LETTERS: [&str; 24] = [
 
 impl Display for Skolem {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if(self.0 < 24) {
+        if self.0 < 24 {
             write!(f, "{}", GREEK_LETTERS[self.0])
         } else {
             write!(f, "sk{}", self.0)
@@ -47,6 +53,8 @@ impl Display for Skolem {
     }
 }
 
+/// A monotype is a type which cannot contain foralls.
+/// We notate monotypes as τ.
 #[derive(Clone, Debug)]
 enum Monotype {
     Var(TypeVar),
@@ -69,6 +77,7 @@ impl Display for Monotype {
 }
 
 impl Monotype {
+    /// Collect the free type variables in a monotype.
     fn ftv(&self) -> HashSet<TypeVar> {
         match self {
             Monotype::Var(v) => {
@@ -81,6 +90,7 @@ impl Monotype {
         }
     }
 
+    /// Substitute skolem variables in a type with type variables.
     fn subst_skolem_in_type(&self, mapping: &HashMap<Skolem, TypeVar>) -> Monotype {
         match self {
             Monotype::Skolem(sk) => match mapping.get(sk) {
@@ -96,6 +106,7 @@ impl Monotype {
         }
     }
 
+    /// Apply a substitution to a monotype.
     fn apply_substitution(&self, substitution: &Substitution) -> Monotype {
         match self {
             Monotype::Var(v) => {
@@ -108,6 +119,7 @@ impl Monotype {
     }
 }
 
+/// An equality constraint is a statement that two types are equal.
 #[derive(Debug, Clone)]
 struct EqConstraint(Monotype, Monotype);
 
@@ -117,7 +129,9 @@ impl Display for EqConstraint {
     }
 }
 
-
+/// A class constraint is a statement that a type belongs to a class.
+/// An example might be `Eq a`, which states that `a` is an instance of the
+/// `Eq` class - i.e. it can be compared for equality.
 #[derive(Debug, Clone)]
 struct ClassConstraint(String, Monotype);
 
@@ -148,6 +162,8 @@ impl Display for Constraint {
     }
 }
 
+/// A polytype is a type with some number of foralls at the beginning.
+/// We notate polytypes as σ.
 #[derive(Clone, Debug)]
 struct Polytype {
     vars: Vec<Skolem>,
@@ -166,7 +182,8 @@ impl Display for Polytype {
 }
 
 impl Polytype {
-    /// Turns skolems into type variables.
+    /// Turn a polytype into a monotype, replacing all type variables with
+    /// skolem variables (they should not be solved for).
     fn inst(&self) -> (Monotype, Vec<ClassConstraint>) {
         let mapping = 
             self
@@ -185,6 +202,10 @@ impl Polytype {
     }
 }
 
+/// The environment is a mapping between variable names and their types.
+/// Notably, the environment contains polytypes, not monotypes.
+/// 
+/// The environment is notated as Γ.
 #[derive(Clone, Debug)]
 struct Environment(HashMap<String, Polytype>);
 
@@ -205,11 +226,13 @@ impl Environment {
         self.0.get(name).expect(&format!("Unbound variable {}", name))
     }
 
+    /// Collect the free type variables in the environment.
     fn ftv(&self) -> HashSet<TypeVar> {
         self.0.values().flat_map(|p| p.ty.ftv()).collect()
     }
 }
 
+/// An expression in our language.
 enum Expr {
     Var(String),
     Lam(String, Box<Expr>),
@@ -255,6 +278,8 @@ impl Substitution {
     }
 }
 
+/// Attempt to solve a set of constraints, returning a substitution that
+/// satisfies the most constraints possible.
 fn solve(mut constraints: Vec<Constraint>) -> (Vec<Constraint>, Substitution) {
     let mut class_constraints = vec![];
     let mut substitution: Substitution = Substitution::new();
@@ -263,10 +288,12 @@ fn solve(mut constraints: Vec<Constraint>) -> (Vec<Constraint>, Substitution) {
 
     while let Some(constraint) = constraints.pop() {
         match constraint {
+            // we can't actually solve class constraints here lol
             Constraint::Class(c) => {
                 class_constraints.push(c)
             },
             Constraint::Eq(EqConstraint(ty_1,ty_2 )) => match (ty_1, ty_2) {
+                // a = a; already satisfied
                 (Var(v_1), Var(v_2)) if v_1 == v_2 => {},
                 (Var(v), m) | (m, Var(v))  => {
                     if let Some(ty) = substitution.get(v) {
@@ -276,10 +303,12 @@ fn solve(mut constraints: Vec<Constraint>) -> (Vec<Constraint>, Substitution) {
                         substitution.insert(v, m);
                     }
                 },
+                // (a → b) = (c → d) => a = c, b = d
                 (Arrow(a, b), Arrow(c, d)) => {
                     constraints.push(Constraint::eq(*a, *c));
                     constraints.push(Constraint::eq(*b, *d));
                 },
+                // Skolems can only unify with themselves.
                 (Skolem(s), Skolem(z)) if s == z => {},
                 (Int, Int) => {},
                 (Bool, Bool) => {},
@@ -296,6 +325,7 @@ fn solve(mut constraints: Vec<Constraint>) -> (Vec<Constraint>, Substitution) {
     (constraints, substitution)
 }
 
+/// Collect the free type variables from a set of constraints.
 fn ftv_constraints(constraints: &Vec<Constraint>) -> HashSet<TypeVar> {
     constraints.iter().map(|c| match c {
         Constraint::Class(ClassConstraint(_, ty)) => ty.ftv(),
@@ -303,6 +333,7 @@ fn ftv_constraints(constraints: &Vec<Constraint>) -> HashSet<TypeVar> {
     }).flat_map(|s| s).collect()
 }
 
+/// Apply a substitution to a set of constraints.
 fn apply_substitution_to_constraints(constraints: Vec<Constraint>, substitution: &Substitution) -> Vec<Constraint> {
     constraints.into_iter().map(|c| match c {
         Constraint::Class(ClassConstraint(name, ty)) => Constraint::Class(ClassConstraint(name, ty.apply_substitution(substitution))),
@@ -310,16 +341,42 @@ fn apply_substitution_to_constraints(constraints: Vec<Constraint>, substitution:
     }).collect()
 }
 
+/// Infer the type of an expression.
 fn infer(env: &Environment, expr: &Expr) -> (Monotype, Vec<Constraint>) {
     use Expr::*;
+    // Each of these matches a syntax-directed rule in the inference system.
+    // In each rule, we have the premises above the line and the conclusion below the line.
+    // Generally, a premise means we need to infer the type of some subexpression.
+    // The conclusion is the type of the expression itself.
+    // The conclusion may also generate some constraints that need to be solved.
+    // In general, you can read an expression that looks like
+    //     Γ ⊢ e : τ ↝ C
+    // as "Given the environment Γ, the expression e has type τ, generating constraints C."
+    // Constraints "flow down" the tree; they do not "flow up" at all.
     match expr {
+        // Integer constants:
+        //
+        // -------------
+        //  Γ ⊢ n : Int
         Int(_) => (Monotype::Int, vec![]),
+        // Boolean constants:
+        //
+        // --------------
+        //  Γ ⊢ b : Bool
         Bool(_) => (Monotype::Bool, vec![]),
+        //           x : σ ∈ Γ
+        // -------------------------------
+        //  Γ ⊢ x : inst(σ).0 ↝ inst(σ).1
         Var(x) => {
             let (ty, cs) = env.lookup(&x).inst();
             let cs = cs.into_iter().map(Constraint::Class).collect();
             (ty, cs)
         },
+        // Function application:
+        //
+        //     Γ ⊢ f : τ₁ ↝ C₁     Γ ⊢ x : τ₂ ↝ C₂
+        // -------------------------------------------
+        //  Γ ⊢ (f x) : τ₀ ↝ C₁ ∪ C₂ ∪ {τ₁ = τ₂ → τ₀}
         App(func, arg) => {
             let (func_type, func_cs) = infer(env, func);
             let ret_type = Monotype::Var(TypeVar::new());
@@ -335,6 +392,15 @@ fn infer(env: &Environment, expr: &Expr) -> (Monotype, Vec<Constraint>) {
 
             (ret_type, cs)
         }
+        // Lambda abstraction:
+        //
+        //  fresh(τ₀)    Γ, x : ∀ . Ø . τ₀ ⊢ e : τ₁ ↝ C
+        // ---------------------------------------------
+        //             Γ ⊢ λx. e : τ₀ → τ₁ ↝ C
+        //
+        // The premise with x really just means "this is a polytype with no foralls".
+        // We can't assume anything about x; this is why let generalization is important.
+        // `fresh` here is equivalent to saying "let τ₀ be a new type variable".
         Lam(var, body ) => {
             let arg_type = Monotype::Var(TypeVar::new());
 
@@ -354,6 +420,11 @@ fn infer(env: &Environment, expr: &Expr) -> (Monotype, Vec<Constraint>) {
 
             (ty, body_cs)
         }
+        // If expressions:
+        //
+        //       Γ ⊢ c :   τ₀ ↝ C₁     Γ ⊢ t : τ₁ ↝ C₂     Γ ⊢ e : τ₂ ↝ C₃
+        // ---------------------------------------------------------------------
+        //  Γ ⊢ (if c then t else e) : τ₁ ↝ C₁ ∪ C₂ ∪ C₃ ∪ {τ₀ = Bool, τ₁ = τ₂}
         If(cond, then, r#else) => {
             let (cond_type, cond_cs) = infer(env, cond);
             let (then_type, then_cs) = infer(env, then);
@@ -367,12 +438,28 @@ fn infer(env: &Environment, expr: &Expr) -> (Monotype, Vec<Constraint>) {
 
             (then_type, cs)
         }
+        // Let expressions:
+        // (For "Σ @ x", read "the substitution Σ applied to x".)
+        // Abbreviations here:
+        // - cco "class constraints of"
+        // - Σ₁[v ⟳ α]  Assign skolems α₁, α₂, ... αₙ to v₁, v₂, ... vₙ and make a substitution Σ₁
+        //
+        // 1. v = ftv(C₁) ∪ ftv(Σ @ x) - ftv(Γ)
+        // 
+        //   Γ ⊢ value : τ₀ ↝ C₀     (C₁, Σ₀) = solve(C₀)        Γ,x:(Σ₁[v ⟳ α] @ τ₀) ⊢ body : τ₁ ↝ C₂
+        // ---------------------------------------------------------------------------------------------
+        //                      Γ ⊢ let x = value in body : τ₁ ↝ C₂
+        // 
+        // TODO i need to fix this comment up it sucks
         Let(var, value, body) => {
             let (value_type, value_cs) = infer(env, value);
             let (cs, substitution) = solve(value_cs);
             let value_type = value_type.apply_substitution(&substitution);
             let cs_ftv = ftv_constraints(&cs);
             let env_ftv = env.ftv();
+
+            // v = ftv(value) ∪ ftv(cs) - ftv(env)
+            // assign α₁, α₂, ... αₙ to v₁, v₂, ... vₙ
 
             let skolems: Vec<(TypeVar, Skolem)> = value_type.ftv().union(&cs_ftv).filter(|t| !env_ftv.contains(t)).copied().map(|t| (t, Skolem::new())).collect();
 
@@ -399,6 +486,18 @@ fn infer(env: &Environment, expr: &Expr) -> (Monotype, Vec<Constraint>) {
     }
 }
 
+
+/// Get the type of an expression.
+/// Attempts to fully solve constraints and substitute type variables.
+fn type_of(expr: &Expr, env: &Environment) -> (Monotype, Vec<Constraint>) {
+    let (ty, constraints) = infer(env, expr);
+    let (constraints, substitution) = solve(constraints);
+    let ty = ty.apply_substitution(&substitution);
+    let constraints = apply_substitution_to_constraints(constraints, &substitution);
+    (ty, constraints)
+}
+
+/// Helper function to display constraints.
 fn stringify_constraints(constraints: Vec<Constraint>) -> String {
     constraints.iter().map(|c| format!("{}", c)).collect::<Vec<String>>().join(", ")
 }
@@ -438,10 +537,11 @@ fn main() {
                 )),
             )),
         )),
-        Box::new(Expr::App(
-            Box::new(Expr::App(Box::new(Expr::Var("max".to_string())), Box::new(Expr::Int(3)))),
-            Box::new(Expr::Int(4)),
-        )),
+        Box::new(Expr::Var("max".to_string()))
+        // Box::new(Expr::App(
+        //     Box::new(Expr::App(, Box::new(Expr::Int(3)))),
+        //     Box::new(Expr::Int(4)),
+        // )),
     );
 
     let const_fn = Expr::Lam(
@@ -454,12 +554,7 @@ fn main() {
         Box::new(Expr::Bool(true))
     );
 
-    let (ty, constraints) = infer(&environment, &max);
-
-    let (constraints, substitution) = solve(constraints);
-
-    let ty = ty.apply_substitution(&substitution);
-    let constraints = apply_substitution_to_constraints(constraints, &substitution);
+    let (ty, constraints) = type_of(&max, &environment);
 
     println!("Type: {}", ty);
     println!("Constraints: {}", stringify_constraints(constraints));
@@ -483,5 +578,5 @@ mod test {
         ];
 
         solve(constraints);
-}
+    }
 }
